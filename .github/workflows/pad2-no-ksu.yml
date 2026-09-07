@@ -1,0 +1,99 @@
+name: Pad 2 - WildKernels No KSU
+
+permissions:
+  contents: read
+  actions: write
+
+on:
+  push:
+    branches:
+      - pad2-no-ksu
+  workflow_dispatch:
+    inputs:
+      optimize_level:
+        description: Compiler optimization level
+        required: true
+        type: choice
+        options: [O2, O3]
+        default: O2
+      clean_build:
+        description: Clean build without ccache
+        required: false
+        type: boolean
+        default: false
+      debug:
+        description: Enable debug artifacts/logs
+        required: false
+        type: boolean
+        default: false
+      build_timestamp:
+        description: Custom uname build timestamp; empty = current UTC
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: pad2-no-ksu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-pad2:
+    name: OP-PAD-2-SM8650 / no KernelSU / no SUSFS
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            git curl ca-certificates build-essential clang lld flex bison \
+            libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
+            libxml2-utils rsync unzip dwarves file python3 ccache jq bc \
+            dos2unix kmod libdw-dev elfutils pigz
+
+      - name: Prepare and validate Pad 2 config
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONFIG_FILE="configs/a16/OP-PAD-2-SM8650.json"
+          jq -e '
+            .model == "OP-PAD-2-SM8650" and
+            .os_version == "A16" and
+            .android_version == "android14" and
+            .kernel_version == "6.1" and
+            .lto == "thin" and
+            .hmbird == false and
+            .hmbird_compat == true and
+            .susfs == false and
+            .opt == true and
+            .ds == true and
+            .bbg == true and
+            .bbr == true and
+            .bbr3 == true and
+            .ttl == true and
+            .ip_set == true and
+            .unicode == true and
+            .ntsync == true
+          ' "$CONFIG_FILE" >/dev/null
+          echo "config_json=$(jq -c . "$CONFIG_FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: Build Pad 2 kernel without KernelSU or SUSFS
+        id: build
+        uses: ./.github/actions/build-kernel
+        with:
+          op_config_json: ${{ steps.config.outputs.config_json }}
+          ksu_type: NONE
+          ksu_branch_or_hash: ''
+          susfs_commit_hash_or_branch: ''
+          optimize_level: ${{ inputs.optimize_level || 'O2' }}
+          clean: ${{ inputs.clean_build || false }}
+          debug: ${{ inputs.debug || false }}
+          build_timestamp: ${{ inputs.build_timestamp || '' }}
+          github_token: ${{ github.token }}
