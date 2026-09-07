@@ -255,3 +255,121 @@ runs:
         seconds = total_duration % 60
         print(f"Kernel Sync completed in {minutes}m {seconds:.2f}s")
         print("::endgroup::")
+
+    - name: Apply minimal HMBIRD GKI compatibility
+      if: ${{ env.OP_HMBIRD_COMPAT == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.source_location }}
+      run: |
+        set -euo pipefail
+
+        if [[ "${OP_MODEL:-}" != "OP-PAD-2-SM8650" || \
+              "${OP_OS_VERSION:-}" != "A16" || \
+              "${OP_ANDROID_VERSION:-}" != "android14" || \
+              "${OP_KERNEL_VERSION:-}" != "6.1" ]]; then
+          echo "::error::hmbird_compat is only validated for OP-PAD-2-SM8650 A16 android14-6.1"
+          exit 1
+        fi
+
+        common="kernel_platform/common"
+        makefile="$common/drivers/Makefile"
+        source="$common/drivers/hmbird_patch.c"
+
+        test -f "$makefile"
+        if [[ -e "$source" ]] && ! grep -qF 'opd2403_hmbird_gki_compat_init' "$source"; then
+          echo "::error::Unexpected pre-existing drivers/hmbird_patch.c; refusing to overwrite it"
+          exit 1
+        fi
+
+        cat > "$source" <<'HMBIRD_EOF'
+        // SPDX-License-Identifier: GPL-2.0-only
+        #include <linux/init.h>
+        #include <linux/kernel.h>
+        #include <linux/of.h>
+        #include <linux/slab.h>
+        #include <linux/string.h>
+
+        #define OPD2403_HMBIRD_NODE "/soc/oplus,hmbird/version_type"
+        #define OPD2403_HMBIRD_PROP "type"
+        #define OPD2403_HMBIRD_OGKI "HMBIRD_OGKI"
+        #define OPD2403_HMBIRD_GKI  "HMBIRD_GKI"
+
+        static int __init opd2403_hmbird_gki_compat_init(void)
+        {
+        	struct device_node *np;
+        	struct property *new_prop;
+        	const char *type;
+        	char *name;
+        	char *value;
+        	int ret;
+
+        	np = of_find_node_by_path(OPD2403_HMBIRD_NODE);
+        	if (!np) {
+        		pr_info("opd2403_hmbird: DT node %s not found; leaving mode unchanged\n",
+        			OPD2403_HMBIRD_NODE);
+        		return 0;
+        	}
+
+        	ret = of_property_read_string(np, OPD2403_HMBIRD_PROP, &type);
+        	if (ret) {
+        		pr_info("opd2403_hmbird: DT type property missing (%d); leaving mode unchanged\n",
+        			ret);
+        		of_node_put(np);
+        		return 0;
+        	}
+
+        	if (!strcmp(type, OPD2403_HMBIRD_GKI)) {
+        		pr_info("opd2403_hmbird: already in HMBIRD_GKI mode\n");
+        		of_node_put(np);
+        		return 0;
+        	}
+
+        	if (strcmp(type, OPD2403_HMBIRD_OGKI)) {
+        		pr_info("opd2403_hmbird: unexpected mode '%s'; leaving DT unchanged\n", type);
+        		of_node_put(np);
+        		return 0;
+        	}
+
+        	new_prop = kzalloc(sizeof(*new_prop), GFP_KERNEL);
+        	name = kstrdup(OPD2403_HMBIRD_PROP, GFP_KERNEL);
+        	value = kstrdup(OPD2403_HMBIRD_GKI, GFP_KERNEL);
+        	if (!new_prop || !name || !value) {
+        		pr_err("opd2403_hmbird: allocation failed\n");
+        		kfree(value);
+        		kfree(name);
+        		kfree(new_prop);
+        		of_node_put(np);
+        		return 0;
+        	}
+
+        	new_prop->name = name;
+        	new_prop->value = value;
+        	new_prop->length = strlen(OPD2403_HMBIRD_GKI) + 1;
+
+        	ret = of_update_property(np, new_prop);
+        	if (ret) {
+        		pr_err("opd2403_hmbird: failed to switch OGKI -> GKI (%d)\n", ret);
+        		kfree(value);
+        		kfree(name);
+        		kfree(new_prop);
+        	} else {
+        		pr_info("opd2403_hmbird: switched HMBIRD_OGKI -> HMBIRD_GKI\n");
+        	}
+
+        	of_node_put(np);
+        	return 0;
+        }
+        early_initcall(opd2403_hmbird_gki_compat_init);
+        HMBIRD_EOF
+
+        if ! grep -qxF 'obj-y += hmbird_patch.o' "$makefile"; then
+          printf '\nobj-y += hmbird_patch.o\n' >> "$makefile"
+        fi
+
+        grep -qxF 'obj-y += hmbird_patch.o' "$makefile"
+        grep -qF 'opd2403_hmbird_gki_compat_init' "$source"
+        grep -qF 'HMBIRD_OGKI' "$source"
+        grep -qF 'HMBIRD_GKI' "$source"
+        grep -qF 'early_initcall(opd2403_hmbird_gki_compat_init);' "$source"
+
+        echo "Applied minimal OPD2403 HMBIRD_OGKI -> HMBIRD_GKI compatibility shim"
