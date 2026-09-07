@@ -41,6 +41,22 @@ jobs:
     name: OP-PAD-2-SM8650 / no KernelSU / no SUSFS
     runs-on: ubuntu-latest
     timeout-minutes: 360
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 12G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: 'true'
+      CCACHE_IGNOREOPTIONS: '--sysroot*'
+      CCACHE_COMPRESSION: 'true'
+      CCACHE_COMPRESSION_LEVEL: '3'
+      CCACHE_DIRECT: 'true'
+      CCACHE_FILE_CLONE: 'true'
+      CCACHE_INODE_CACHE: 'true'
+      CCACHE_IS_KERNEL_COMPILING: 'true'
+      CCACHE_UMASK: '002'
+      CCACHE_LOGFILE: ${{ github.workspace }}/ccache.log
+      CCACHE_SLOPPINESS: file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
 
     steps:
       - name: Checkout
@@ -56,6 +72,7 @@ jobs:
             libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
             libxml2-utils rsync unzip dwarves file python3 ccache jq bc \
             dos2unix kmod libdw-dev elfutils pigz
+          mkdir -p "$CCACHE_DIR"
 
       - name: Prepare and validate Pad 2 config
         id: config
