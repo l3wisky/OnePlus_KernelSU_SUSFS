@@ -14,6 +14,7 @@
   "rust_build": false,
   "disk_cleanup": false,
   "hmbird": false,
+  "hmbird_compat": true,
   "susfs": true,
   "opt": true,
   "ds": true,
