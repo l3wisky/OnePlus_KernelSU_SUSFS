@@ -1,0 +1,172 @@
+name: Pad 2 Only - WildKernels Fast Build
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      ksu_type:
+        description: 'KernelSU implementation'
+        required: true
+        type: choice
+        options:
+          - KSUN
+          - KSU
+        default: KSUN
+      ksu_ref:
+        description: 'KernelSU branch/tag/commit hash'
+        required: true
+        type: string
+        default: 'dev'
+      susfs_ref:
+        description: 'SUSFS branch/tag/commit hash for android14-6.1'
+        required: true
+        type: string
+        default: 'gki-android14-6.1'
+      optimize_level:
+        description: 'Compiler optimization level'
+        required: true
+        type: choice
+        options:
+          - O2
+          - O3
+        default: O2
+      clean_build:
+        description: 'Clean build (disable ccache restore)'
+        required: false
+        type: boolean
+        default: false
+      debug:
+        description: 'Build modules and upload debug artifacts'
+        required: false
+        type: boolean
+        default: false
+      build_timestamp:
+        description: 'Custom kernel build timestamp; empty = current UTC time'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: pad2-only-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TARGET_CONFIG: configs/a16/OP-PAD-2-SM8650.json
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_MAXSIZE: 12G
+  CCACHE_COMPILERCHECK: content
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_NOHASHDIR: 'true'
+  CCACHE_IGNOREOPTIONS: '--sysroot*'
+  CCACHE_COMPRESSION: 'true'
+  CCACHE_COMPRESSION_LEVEL: '3'
+  CCACHE_DIRECT: 'true'
+  CCACHE_FILE_CLONE: 'true'
+  CCACHE_INODE_CACHE: 'true'
+  CCACHE_IS_KERNEL_COMPILING: 'true'
+  CCACHE_UMASK: '002'
+  CCACHE_LOGFILE: ${{ github.workspace }}/ccache.log
+  CCACHE_SLOPPINESS: file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
+
+jobs:
+  build-pad2:
+    name: OP-PAD-2-SM8650 A16 android14-6.1
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout selected ref
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Validate target config and manual inputs
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$TARGET_CONFIG"
+          jq -e '
+            .model == "OP-PAD-2-SM8650" and
+            .os_version == "A16" and
+            .android_version == "android14" and
+            .kernel_version == "6.1" and
+            .lto == "thin" and
+            .hmbird == false and
+            .hmbird_compat == true
+          ' "$TARGET_CONFIG" >/dev/null
+
+          KSU_REF='${{ inputs.ksu_ref }}'
+          SUSFS_REF='${{ inputs.susfs_ref }}'
+          test -n "$KSU_REF"
+          test -n "$SUSFS_REF"
+
+          echo "config=$(jq -c . "$TARGET_CONFIG")" >> "$GITHUB_OUTPUT"
+          echo "Target locked to OP-PAD-2-SM8650 A16 android14-6.1"
+          echo "KSU: ${{ inputs.ksu_type }} @ $KSU_REF"
+          echo "SUSFS: $SUSFS_REF"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -o Acquire::Retries=3 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git curl ca-certificates build-essential clang lld flex bison \
+            libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
+            libxml2-utils rsync unzip dwarves file python3 ccache jq bc dos2unix \
+            kmod libdw-dev elfutils pigz
+          sudo apt-get clean
+          mkdir -p "$CCACHE_DIR"
+          if ccache --help 2>&1 | grep -q 'depend_mode'; then
+            echo 'CCACHE_DEPEND=true' >> "$GITHUB_ENV"
+          fi
+          ccache -p || true
+
+      - name: Build only OnePlus Pad 2
+        id: build
+        uses: ./.github/actions/build-kernel
+        with:
+          op_config_json: ${{ steps.target.outputs.config }}
+          ksu_type: ${{ inputs.ksu_type }}
+          ksu_branch_or_hash: ${{ inputs.ksu_ref }}
+          susfs_commit_hash_or_branch: ${{ inputs.susfs_ref }}
+          optimize_level: ${{ inputs.optimize_level }}
+          build_timestamp: ${{ inputs.build_timestamp }}
+          clean: ${{ inputs.clean_build }}
+          debug: ${{ inputs.debug }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pad 2 build summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '## OP-PAD-2-SM8650 only'
+            echo ''
+            echo '- Device: OP-PAD-2-SM8650'
+            echo '- OS: OxygenOS 16'
+            echo '- Base: android14-6.1'
+            echo '- LTO: ThinLTO'
+            echo '- HMBIRD: minimal OGKI -> GKI compatibility'
+            echo '- KSU type: ${{ inputs.ksu_type }}'
+            echo '- KSU ref: `${{ inputs.ksu_ref }}`'
+            echo '- SUSFS ref: `${{ inputs.susfs_ref }}`'
+            echo '- Optimization: ${{ inputs.optimize_level }}'
+            echo '- Clean build: ${{ inputs.clean_build }}'
+            echo '- Debug: ${{ inputs.debug }}'
+            echo '- No multi-device matrix'
+            echo ''
+            echo "- Result: ${{ steps.build.outcome }}"
+            if [ "${{ steps.build.outcome }}" = success ]; then
+              echo "- Kernel: ${{ steps.build.outputs.kernel_version }}"
+              echo "- KSU version: ${{ steps.build.outputs.ksu_version }}"
+              echo "- SUSFS version: ${{ steps.build.outputs.susfs_version }}"
+              echo "- Image SHA256: ${{ steps.build.outputs.image_sha256 }}"
+              echo "- ZIP SHA256: ${{ steps.build.outputs.zip_sha256 }}"
+              echo "- Build time: ${{ steps.build.outputs.build_time }}s"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
